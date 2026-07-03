@@ -4,9 +4,9 @@ saved_model/
 __pycache__/
 fontes/
 logs/
-plots/
 resultados_cifar_visual/
 resultados_visuais/
 results/
 TODO.md
 uv.lock
+early_exit_dnn_analysis/
