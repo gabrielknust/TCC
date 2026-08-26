@@ -1,12 +1,14 @@
 data/
 saved_model/
+saved_model_backup_v1_adam/
+saved_model_backup_v2_sgd/
+saved_model_backup_v3_experiment/
 .venv/
 __pycache__/
 fontes/
 logs/
 resultados_cifar_visual/
 resultados_visuais/
-results/
-TODO.md
-uv.lock
+results/preds/
 early_exit_dnn_analysis/
+uv.lock
