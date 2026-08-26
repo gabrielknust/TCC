@@ -5,12 +5,16 @@ from datetime import datetime
 import numpy as np
 import torch
 import torch.nn as nn
-import torchvision
-import torchvision.transforms as transforms
-from torch.utils.data import random_split
 from tqdm import tqdm
 
-from src.model import MobileNetV2EarlyExit
+from src import data
+from src.model import (
+    MobileNetV2EarlyExit,
+    acc_variant_tag,
+    checkpoint_filename,
+    parse_extra_stride1,
+    variant_tag,
+)
 
 
 # --- Configuração do experimento (edite aqui ou sobreponha via env vars) ---
@@ -20,8 +24,11 @@ EPOCHS = int(os.environ.get("EPOCHS", "150"))           # máx. épocas (early s
 # Pesos da loss por saída. Cada item gera um treino separado.
 # Opções: "equal" | "linspace" | "inv_linspace" | CSV (ex: "0.4,0.3,0.3")
 LOSS_WEIGHTS_LIST = os.environ.get("LOSS_WEIGHTS_LIST", "equal,linspace").split(",")
+SAVE_DIR = os.environ.get("SAVE_DIR", "saved_model")
+EXTRA_STRIDE1_BLOCKS = parse_extra_stride1(os.environ.get("EXTRA_STRIDE1", ""))
+VARIANT = os.environ.get("VARIANT", variant_tag(EXTRA_STRIDE1_BLOCKS))
 
-# --- Hiperparâmetros fixos ---
+# --- Hiperparâmetros fixos (receita v1.1: Adam da v1 + fixes de dados) ---
 WARMUP_EPOCHS = 5
 PATIENCE = 30
 BATCH_SIZE = 128
@@ -29,9 +36,11 @@ LR_WARMUP = 1e-3
 LR_FINETUNE = 1e-4
 NUM_CLASSES = 10       # CIFAR-10
 INPUT_SIZE = 32        # CIFAR-10
-SAVE_DIR = "saved_model"
 DATA_ROOT = "./data"
-SEED = 42              # trava o split train/val p/ reprodutibilidade (usado tb. em calibrate.py)
+# Melhora mínima para contar como progresso. Sem isso, ganhos irrisórios (1e-5)
+# resetam a paciência e o early stopping nunca dispara.
+MIN_DELTA_LOSS = 1e-4
+MIN_DELTA_ACC = 0.05   # pontos percentuais
 
 
 def setup_logging():
@@ -83,13 +92,15 @@ def evaluate(model, loader, criterion, weights, device):
 
 
 def run_training(loss_weights_spec, trainloader, valloader, testloader,
-                 train_dataset, device):
+                 n_train, device):
     n_exits = N_BRANCHES + 1
     weights = get_loss_weights(loss_weights_spec, n_exits)
 
     logging.info("=" * 60)
     logging.info(f"TREINO: MobileNetV2 + {N_BRANCHES} early exits (n_exits={n_exits})")
     logging.info(f"Estratégia: {loss_weights_spec}")
+    logging.info(f"Variante: {VARIANT or 'arquitetura padrão'} | "
+                 f"extra_stride1_blocks={EXTRA_STRIDE1_BLOCKS}")
     logging.info(f"Pesos de loss: {[f'{w:.3f}' for w in weights]}")
     logging.info("=" * 60)
 
@@ -98,6 +109,7 @@ def run_training(loss_weights_spec, trainloader, valloader, testloader,
         num_classes=NUM_CLASSES,
         input_size=INPUT_SIZE,
         pretrained=True,
+        extra_stride1_blocks=EXTRA_STRIDE1_BLOCKS,
     ).to(device)
     logging.info(f"Posições dos ramos (índices em features[]): {model.exit_positions}")
 
@@ -110,11 +122,25 @@ def run_training(loss_weights_spec, trainloader, valloader, testloader,
     )
 
     tag = loss_weights_spec.replace(",", "-")
-    save_path = os.path.join(
-        SAVE_DIR, f"mobilenet_b{N_BRANCHES}_{tag}_best.pth"
-    )
+    # Dois checkpoints da MESMA trajetória: um pelo melhor val loss, outro pela
+    # melhor val acc. Assim o efeito do critério de seleção fica isolado da
+    # variância entre treinos (antes eram runs diferentes).
+    selections = {
+        "loss": {
+            "path": os.path.join(SAVE_DIR,
+                                 checkpoint_filename(N_BRANCHES, tag, VARIANT)),
+            "best": float("inf"), "delta": MIN_DELTA_LOSS,
+        },
+        "acc": {
+            "path": os.path.join(
+                SAVE_DIR,
+                checkpoint_filename(N_BRANCHES, tag, acc_variant_tag(VARIANT))),
+            "best": float("inf"), "delta": MIN_DELTA_ACC,
+        },
+    }
+    for key, sel in selections.items():
+        logging.info(f"Checkpoint [{key}]: {sel['path']}")
 
-    best_val_loss = float("inf")
     no_improve = 0
     is_finetuning = False
 
@@ -142,7 +168,7 @@ def run_training(loss_weights_spec, trainloader, valloader, testloader,
             running_loss += loss.item() * images.size(0)
             bar.set_postfix(loss=loss.item())
 
-        train_loss = running_loss / len(train_dataset)
+        train_loss = running_loss / n_train
         val_loss, val_accs = evaluate(model, valloader, criterion, weights, device)
 
         accs_str = " | ".join(f"S{i+1}: {a:.1f}%" for i, a in enumerate(val_accs[:-1]))
@@ -151,64 +177,68 @@ def run_training(loss_weights_spec, trainloader, valloader, testloader,
             f"{accs_str} | Final: {val_accs[-1]:.1f}%"
         )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Ambos como "menor é melhor": a acurácia entra negada.
+        scores = {"loss": val_loss, "acc": -sum(val_accs) / len(val_accs)}
+        improved = []
+        for key, sel in selections.items():
+            if scores[key] < sel["best"] - sel["delta"]:
+                sel["best"] = scores[key]
+                improved.append(key)
+                torch.save({
+                    "state_dict": model.state_dict(),
+                    "n_branches": N_BRANCHES,
+                    "exit_positions": model.exit_positions,
+                    "num_classes": NUM_CLASSES,
+                    "input_size": INPUT_SIZE,
+                    "extra_stride1_blocks": model.extra_stride1_blocks,
+                    "norm_mean": data.IMAGENET_MEAN,
+                    "norm_std": data.IMAGENET_STD,
+                    "train_recipe": "v4-adam-warmupfix",
+                    "select_metric": key,
+                    "epoch": epoch + 1,
+                }, sel["path"])
+
+        if improved:
             no_improve = 0
-            torch.save({
-                "state_dict": model.state_dict(),
-                "n_branches": N_BRANCHES,
-                "exit_positions": model.exit_positions,
-                "num_classes": NUM_CLASSES,
-                "input_size": INPUT_SIZE,
-            }, save_path)
-            logging.info(f"   --> SALVO (loss={best_val_loss:.4f})")
+            marks = ", ".join(
+                f"{k}={abs(selections[k]['best']):.4f}" for k in improved
+            )
+            logging.info(f"   --> SALVO [{'/'.join(improved)}] ({marks})")
         else:
+            # Só para quando NENHUM dos dois critérios melhora, para que ambos
+            # os checkpoints tenham a mesma chance.
             no_improve += 1
             logging.info(f"   --> Sem melhora. Paciência: {no_improve}/{PATIENCE}")
             if no_improve >= PATIENCE:
                 logging.info("EARLY STOPPING")
                 break
 
-    logging.info("Carregando melhor modelo para teste final...")
-    ckpt = torch.load(save_path, map_location=device)
-    model.load_state_dict(ckpt["state_dict"])
-    test_loss, test_accs = evaluate(model, testloader, criterion, weights, device)
-    logging.info("-" * 60)
-    logging.info(f"RESULTADOS FINAIS (TEST) — {loss_weights_spec}:")
-    logging.info(f"Loss global: {test_loss:.4f}")
-    for i, a in enumerate(test_accs[:-1]):
-        logging.info(f"Acc Saída {i+1}: {a:.2f}%")
-    logging.info(f"Acc Final:    {test_accs[-1]:.2f}%")
-    logging.info("-" * 60)
+    for key, sel in selections.items():
+        logging.info(f"Avaliando checkpoint selecionado por val {key}...")
+        ckpt = torch.load(sel["path"], map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["state_dict"])
+        test_loss, test_accs = evaluate(model, testloader, criterion, weights, device)
+        logging.info("-" * 60)
+        logging.info(
+            f"RESULTADOS FINAIS (TEST) — {loss_weights_spec} "
+            f"[seleção: {key}, época {ckpt['epoch']}]:"
+        )
+        logging.info(f"Loss global: {test_loss:.4f}")
+        for i, a in enumerate(test_accs[:-1]):
+            logging.info(f"Acc Saída {i+1}: {a:.2f}%")
+        logging.info(f"Acc Final:    {test_accs[-1]:.2f}%")
+        logging.info("-" * 60)
 
 
 def main():
     setup_logging()
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(INPUT_SIZE, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-
-    full_trainset = torchvision.datasets.CIFAR10(
-        root=DATA_ROOT, train=True, download=True, transform=transform_train
-    )
-    train_size = int(0.8 * len(full_trainset))
-    val_size = len(full_trainset) - train_size
-    split_gen = torch.Generator().manual_seed(SEED)
-    train_dataset, val_dataset = random_split(
-        full_trainset, [train_size, val_size], generator=split_gen
-    )
-    testset = torchvision.datasets.CIFAR10(
-        root=DATA_ROOT, train=False, download=True, transform=transform_test
-    )
+    # Split compartilhado com calibrate.py (ver src/data.py): treino com
+    # augmentation, validação limpa e dividida — aqui usamos só a metade de
+    # seleção; a outra metade fica reservada para a calibração.
+    train_dataset, val_dataset, _val_calib = data.train_val_datasets(DATA_ROOT)
+    testset = data.test_dataset(DATA_ROOT)
 
     trainloader = torch.utils.data.DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2
@@ -226,7 +256,8 @@ def main():
         logging.info("#" * 60)
         logging.info(f"# INICIANDO RUN: loss_weights={spec}")
         logging.info("#" * 60)
-        run_training(spec, trainloader, valloader, testloader, train_dataset, device)
+        run_training(spec, trainloader, valloader, testloader,
+                     len(train_dataset), device)
 
 
 if __name__ == "__main__":

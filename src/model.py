@@ -22,6 +22,28 @@ class ExitHead(nn.Module):
         return self.net(x)
 
 
+def parse_extra_stride1(spec):
+    if not spec:
+        return ()
+    return tuple(sorted({int(s) for s in spec.split(",")}))
+
+
+def variant_tag(extra_stride1_blocks):
+    if not extra_stride1_blocks:
+        return ""
+    return "s" + "-".join(str(i) for i in extra_stride1_blocks)
+
+
+def checkpoint_filename(n_branches, weights_tag, variant=""):
+    prefix = f"mobilenet_{variant}" if variant else "mobilenet"
+    return f"{prefix}_b{n_branches}_{weights_tag}_best.pth"
+
+
+def acc_variant_tag(variant=""):
+    """Tag do checkpoint selecionado por acurácia (mesma run, outro critério)."""
+    return f"{variant}-acc" if variant else "acc"
+
+
 class MobileNetV2EarlyExit(nn.Module):
     """MobileNetV2 com N saídas antecipadas posicionadas por distribuição de FLOPs.
 
@@ -34,6 +56,11 @@ class MobileNetV2EarlyExit(nn.Module):
         input_size: lado da imagem de entrada (ex.: 32 para CIFAR).
         pretrained: se True, carrega pesos ImageNet.
         head_dropout: dropout dos exit heads.
+        extra_stride1_blocks: índices de features[] cujos convs stride-2 são
+            reduzidos para stride 1 (variantes v3a/v3b). Não altera shapes de
+            pesos — por isso o valor É salvo no checkpoint e o load DEVE
+            reconstruir com ele, senão o state_dict carrega sem erro na
+            arquitetura errada.
     """
 
     def __init__(
@@ -44,11 +71,15 @@ class MobileNetV2EarlyExit(nn.Module):
         input_size=32,
         pretrained=True,
         head_dropout=0.5,
+        extra_stride1_blocks=(),
     ):
         super().__init__()
         self.n_branches = n_branches
         self.num_classes = num_classes
         self.input_size = input_size
+        self.extra_stride1_blocks = tuple(
+            sorted({int(i) for i in extra_stride1_blocks})
+        )
 
         weights = "IMAGENET1K_V1" if pretrained else None
         backbone = models.mobilenet_v2(weights=weights)
@@ -60,6 +91,21 @@ class MobileNetV2EarlyExit(nn.Module):
                 in_channels=3, out_channels=32, kernel_size=3,
                 stride=1, padding=1, bias=False,
             )
+
+        for idx in self.extra_stride1_blocks:
+            if not 0 < idx < len(backbone.features):
+                raise ValueError(
+                    f"extra_stride1_blocks: índice {idx} fora de features[]"
+                )
+            changed = False
+            for m in backbone.features[idx].modules():
+                if isinstance(m, nn.Conv2d) and m.stride == (2, 2):
+                    m.stride = (1, 1)
+                    changed = True
+            if not changed:
+                raise ValueError(
+                    f"extra_stride1_blocks: features[{idx}] não tem conv com stride 2"
+                )
 
         features_list = list(backbone.features.children())
         self.last_channel = backbone.last_channel
@@ -102,6 +148,12 @@ class MobileNetV2EarlyExit(nn.Module):
                 )
             self.train()
 
+        # Dropout antes do classificador final, como na MobileNetV2 original —
+        # sem ele a saída final seria a única cabeça sem regularização, o que
+        # confunde a leitura de "saídas profundas são mais overconfident".
+        # nn.Dropout não tem parâmetros: o state_dict segue compatível com
+        # checkpoints antigos.
+        self.final_dropout = nn.Dropout(0.2)
         self.final_classifier = nn.Linear(self.last_channel, num_classes)
 
     def _linear_flop_positions(self, n_branches, input_size, features_list):
@@ -136,14 +188,48 @@ class MobileNetV2EarlyExit(nn.Module):
             )
         return positions
 
+    @torch.no_grad()
+    def profile_exit_macs(self):
+        """MACs acumulados até cada saída: backbone até o ramo + head do ramo.
+
+        Retorna lista de tamanho n_branches+1 (a última posição é a saída
+        final: backbone completo + pooling + classifier). thop conta MACs
+        (multiply-accumulate); FLOPs ≈ 2×MACs. Perfila sobre cópias
+        descartáveis em CPU porque thop polui os módulos com buffers.
+        """
+        x = torch.zeros(1, 3, self.input_size, self.input_size)
+        cum = []
+        backbone_total = 0.0
+        for i in range(self.n_branches):
+            stage = copy.deepcopy(self.stages[i]).cpu().eval()
+            f, _ = profile(stage, inputs=(x,), verbose=False)
+            x = stage(x)
+            backbone_total += float(f)
+            head = copy.deepcopy(self.exits[i]).cpu().eval()
+            fh, _ = profile(head, inputs=(x,), verbose=False)
+            cum.append(backbone_total + float(fh))
+        stage = copy.deepcopy(self.stages[-1]).cpu().eval()
+        f, _ = profile(stage, inputs=(x,), verbose=False)
+        x = stage(x)
+        backbone_total += float(f)
+        x = torch.flatten(nn.functional.adaptive_avg_pool2d(x, (1, 1)), 1)
+        fc, _ = profile(
+            copy.deepcopy(self.final_classifier).cpu().eval(),
+            inputs=(x,), verbose=False,
+        )
+        cum.append(backbone_total + float(fc))
+        return cum
+
     def freeze_backbone(self):
-        """Congela tudo exceto o primeiro conv (que foi modificado) e os heads."""
+        """Congela só o backbone pré-treinado.
+
+        Os heads inicializados do zero — exits, classificador final e o primeiro
+        conv (reinicializado na adaptação para 32x32) — continuam treinando: é
+        justamente o que o warmup existe para ajustar.
+        """
         for stage in self.stages:
             for p in stage.parameters():
                 p.requires_grad = False
-        for p in self.final_classifier.parameters():
-            p.requires_grad = False
-        # Descongela o primeiro conv (perdeu pesos pré-treinados na adaptação).
         for p in self.stages[0][0].parameters():
             p.requires_grad = True
 
@@ -155,7 +241,7 @@ class MobileNetV2EarlyExit(nn.Module):
         x = self.stages[-1](x)
         x = nn.functional.adaptive_avg_pool2d(x, (1, 1))
         x = torch.flatten(x, 1)
-        return self.final_classifier(x)
+        return self.final_classifier(self.final_dropout(x))
 
     def forward(self, x):
         """Retorna lista [logits_exit1, ..., logits_exitN, logits_final]."""
