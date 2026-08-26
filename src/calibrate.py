@@ -4,8 +4,10 @@ Replica a receita do orientador (Guo et al., 2017 + variação per-branch):
   - Per-branch: 1 temperatura T_i por saída (total: n_exits temperaturas)
   - Overall:    1 temperatura T única aplicada em todas as saídas
 
-Usa o val set do train split (mesma SEED do train.py) para garantir que as
-amostras de calibração NUNCA foram vistas pelo modelo durante o treino.
+Usa a metade de CALIBRAÇÃO da validação (src/data.py) — disjunta da metade que
+o train.py usa para early stopping e seleção de checkpoint. Assim as amostras
+que ajustam a temperatura não são as mesmas que escolheram o modelo, e nenhuma
+delas foi vista no treino. A normalização é lida do checkpoint (legados: 0.5).
 
 Temperaturas são salvas de volta no próprio checkpoint sob as chaves:
   - temperatures_branches: list[float]
@@ -20,25 +22,27 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
-import torchvision.transforms as transforms
-from torch.utils.data import random_split
 
+from src import data
 from src.inference import load_model
+from src.model import checkpoint_filename, parse_extra_stride1, variant_tag
 
 
 # --- Configuração (edite aqui ou sobreponha via env vars) ---
 N_BRANCHES = int(os.environ.get("N_BRANCHES", "2"))
 LOSS_WEIGHTS_LIST = os.environ.get("LOSS_WEIGHTS_LIST", "equal,linspace").split(",")
+SAVE_DIR = os.environ.get("SAVE_DIR", "saved_model")
+EXTRA_STRIDE1_BLOCKS = parse_extra_stride1(os.environ.get("EXTRA_STRIDE1", ""))
+VARIANT = os.environ.get("VARIANT", variant_tag(EXTRA_STRIDE1_BLOCKS))
 MODEL_PATHS = [
-    f"saved_model/mobilenet_b{N_BRANCHES}_{w.replace(',', '-')}_best.pth"
+    os.path.join(SAVE_DIR,
+                 checkpoint_filename(N_BRANCHES, w.replace(",", "-"), VARIANT))
     for w in LOSS_WEIGHTS_LIST
 ]
 
 # --- Hiperparâmetros fixos ---
 BATCH_SIZE = 128
 DATA_ROOT = "./data"
-SEED = 42                  # DEVE bater com o SEED do train.py
 LBFGS_LR = 0.01
 LBFGS_MAX_ITER = 50
 T_INIT = 1.5               # convenção de Guo et al.
@@ -88,34 +92,25 @@ def fit_temperature(logits, labels, device):
     return T.item(), nll_before, nll_after
 
 
-def build_val_loader():
-    """Reconstrói o MESMO val set usado pelo train.py (seed fixa)."""
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    full_trainset = torchvision.datasets.CIFAR10(
-        root=DATA_ROOT, train=True, download=True, transform=transform
-    )
-    train_size = int(0.8 * len(full_trainset))
-    val_size = len(full_trainset) - train_size
-    gen = torch.Generator().manual_seed(SEED)
-    _, val_dataset = random_split(
-        full_trainset, [train_size, val_size], generator=gen
-    )
+def build_val_loader(mean, std):
+    """Metade de calibração da validação — DISJUNTA da usada para seleção."""
+    _, _, val_calib = data.train_val_datasets(DATA_ROOT, mean, std)
     return torch.utils.data.DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2
-    ), len(val_dataset)
+        val_calib, batch_size=BATCH_SIZE, shuffle=False, num_workers=2
+    ), len(val_calib)
 
 
-def calibrate_one(model_path, val_loader, val_size, device):
+def calibrate_one(model_path, device):
     print("=" * 60)
     print(f"Calibrando: {model_path}")
     print("=" * 60)
 
-    model, _ = load_model(model_path, device)
+    model, ckpt_meta = load_model(model_path, device)
     n_exits = model.n_branches + 1
+    mean, std = data.norm_from_ckpt(ckpt_meta)
+    val_loader, val_size = build_val_loader(mean, std)
     print(f"Modelo: n_branches={model.n_branches}  n_exits={n_exits}")
+    print(f"Normalização: mean={mean} std={std}")
     print(f"Val set: {val_size} amostras")
 
     logits_per_exit, labels = collect_logits(model, val_loader, device)
@@ -148,10 +143,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}\n")
 
-    val_loader, val_size = build_val_loader()
-
     for path in MODEL_PATHS:
-        calibrate_one(path, val_loader, val_size, device)
+        calibrate_one(path, device)
         print()
 
 

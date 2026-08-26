@@ -1,8 +1,13 @@
 """Inferência com cascata edge→cloud.
 
 Avalia um modelo treinado em todo o test set para uma lista de thresholds (p_tar)
-e gera tabela com: acurácia global (± IC95%), fração borda vs nuvem, % de amostras
-e acurácia por saída.
+e gera tabela com: acurácia global (± IC95%), custo computacional médio por
+amostra (MACs), fração borda vs nuvem, % de amostras e acurácia por saída.
+
+O custo médio é a métrica honesta do trade-off: E[MACs] = Σ frac_i · MACs_acum_i,
+onde MACs_acum_i é o custo do backbone até a saída i mais o head da saída.
+"% na borda" sozinho superestima o ganho — um ramo profundo (ex.: ramo 5 do b5,
+a ~83% dos FLOPs totais) conta como "borda" custando quase a rede inteira.
 
 Suporta 3 modos de calibração via CALIB_MODE:
   - "none":     usa logits crus (sem T)
@@ -26,24 +31,37 @@ import math
 import os
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import torch
-import torchvision
-import torchvision.transforms as transforms
 
-from src.model import MobileNetV2EarlyExit
+from src import data
+from src.model import (
+    MobileNetV2EarlyExit,
+    checkpoint_filename,
+    parse_extra_stride1,
+    variant_tag,
+)
 
 
 # --- Configuração do experimento (edite aqui ou sobreponha via env vars) ---
 # Cada combinação (modelo × modo) gera 1 CSV. Total = len(MODEL_PATHS) × len(CALIB_MODES).
 N_BRANCHES = int(os.environ.get("N_BRANCHES", "2"))
 LOSS_WEIGHTS_LIST = os.environ.get("LOSS_WEIGHTS_LIST", "equal,linspace").split(",")
+SAVE_DIR = os.environ.get("SAVE_DIR", "saved_model")
+EXTRA_STRIDE1_BLOCKS = parse_extra_stride1(os.environ.get("EXTRA_STRIDE1", ""))
+VARIANT = os.environ.get("VARIANT", variant_tag(EXTRA_STRIDE1_BLOCKS))
 MODEL_PATHS = [
-    f"saved_model/mobilenet_b{N_BRANCHES}_{w.replace(',', '-')}_best.pth"
+    os.path.join(SAVE_DIR,
+                 checkpoint_filename(N_BRANCHES, w.replace(",", "-"), VARIANT))
     for w in LOSS_WEIGHTS_LIST
 ]
 CALIB_MODES = ["none", "overall", "branches"]
-P_TAR_LIST = [round(0.50 + 0.05 * i, 2) for i in range(10)]  # 0.50 … 0.95
+# 0.50–0.95 em passos de 0.05, mais a cauda fina: modelos com ramo raso muito
+# forte saturam (resolvem quase tudo na 1a saida ja em 0.50) e sem a cauda a
+# curva deles vira quase um ponto.
+P_TAR_LIST = ([round(0.50 + 0.05 * i, 2) for i in range(10)]
+              + [0.96, 0.97, 0.98, 0.99])
 
 # --- Hiperparâmetros fixos ---
 BATCH_SIZE = 128
@@ -52,12 +70,15 @@ DATA_ROOT = "./data"
 
 def load_model(ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    # extra_stride1_blocks NÃO altera shapes de pesos: sem reconstruir a partir
+    # do checkpoint, o state_dict carregaria sem erro na arquitetura errada.
     model = MobileNetV2EarlyExit(
         n_branches=ckpt["n_branches"],
         exit_positions=ckpt["exit_positions"],
         num_classes=ckpt["num_classes"],
         input_size=ckpt["input_size"],
         pretrained=False,
+        extra_stride1_blocks=tuple(ckpt.get("extra_stride1_blocks", ())),
     ).to(device)
     # strict=False tolera buffers extras de thop (total_ops/total_params) em
     # checkpoints antigos salvos antes do fix de _linear_flop_positions.
@@ -133,7 +154,7 @@ def _ci95_half_width(correct_mask):
     return 100 * 1.96 * math.sqrt(p * (1 - p) / n)
 
 
-def cascade_metrics(confs, preds, labels, p_tar):
+def cascade_metrics(confs, preds, labels, p_tar, cum_macs):
     """Para cada amostra, escolhe a primeira saída cuja conf >= p_tar.
     Se nenhuma satisfaz, usa a saída final (nuvem).
     """
@@ -146,10 +167,17 @@ def cascade_metrics(confs, preds, labels, p_tar):
     chosen_pred = preds[torch.arange(n_samples), exit_idx]
     correct = (chosen_pred == labels)
 
+    # Custo médio por amostra: cada amostra paga o custo acumulado da saída
+    # em que foi decidida.
+    cum = torch.tensor(cum_macs, dtype=torch.float64)
+    macs_mean = cum[exit_idx].mean().item()
+
     metrics = {
         "p_tar": p_tar,
         "acc_global_%": 100 * correct.float().mean().item(),
         "acc_global_ci95_%": _ci95_half_width(correct),
+        "macs_mean_M": macs_mean / 1e6,
+        "macs_rel_%": 100 * macs_mean / cum_macs[-1],
     }
 
     # Agregado borda (ramos 0..E-2) vs nuvem (saída final E-1).
@@ -179,8 +207,18 @@ def cascade_metrics(confs, preds, labels, p_tar):
     return metrics
 
 
-def run_model(model_path, loader, n_test, device):
-    """Coleta logits do modelo uma vez e gera 1 CSV por modo de calibração."""
+def _loader(dataset):
+    return torch.utils.data.DataLoader(
+        dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2
+    )
+
+
+def run_model(model_path, device):
+    """Coleta logits (test e validacao) e gera 1 CSV por split x calibracao.
+
+    Os logits crus vao para results/preds/*.npz: com eles qualquer analise
+    posterior (escolha de p_tar, McNemar) roda sem passar pelo modelo de novo.
+    """
     print("=" * 60)
     print(f"Modelo: {model_path}")
     print("=" * 60)
@@ -188,27 +226,49 @@ def run_model(model_path, loader, n_test, device):
     model, ckpt = load_model(model_path, device)
     n_exits = model.n_branches + 1
     print(f"n_branches={model.n_branches}  positions={model.exit_positions}")
-    print(f"Coletando logits para {n_test} amostras...")
-    logits, labels = collect_all_logits(model, loader, device)
+
+    # Cada split usa a MESMA normalizacao com que o checkpoint foi treinado.
+    mean, std = data.norm_from_ckpt(ckpt)
+    print(f"Normalizacao: mean={mean} std={std}")
+    # val_select (nao val_calib): a temperatura foi ajustada em val_calib, entao
+    # la as confiancas parecem melhor calibradas do que seriam em dados novos e
+    # o p_tar escolhido sairia enviesado.
+    _, val_select, _ = data.train_val_datasets(DATA_ROOT, mean, std)
+    splits = {"test": data.test_dataset(DATA_ROOT, mean, std), "val": val_select}
+
+    cum_macs = model.profile_exit_macs()
+    print("MACs acumulados por saida (M): "
+          + ", ".join(f"{m / 1e6:.1f}" for m in cum_macs))
 
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
-    for calib_mode in CALIB_MODES:
-        temperatures = resolve_temperatures(ckpt, n_exits, calib_mode)
-        print(f"\n[calib={calib_mode}]  T={[f'{t:.4f}' for t in temperatures]}")
-        confs, preds = apply_temperatures(logits, temperatures)
+    os.makedirs("results/preds", exist_ok=True)
+    os.makedirs("results", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-        rows = [cascade_metrics(confs, preds, labels, p) for p in P_TAR_LIST]
-        df = pd.DataFrame(rows)
+    for split, dataset in splits.items():
+        print(f"\nColetando logits [{split}] para {len(dataset)} amostras...")
+        logits, labels = collect_all_logits(model, _loader(dataset), device)
+        np.savez_compressed(
+            f"results/preds/{model_tag}_{split}.npz",
+            logits=logits.numpy().astype(np.float16),
+            labels=labels.numpy().astype(np.int16),
+            cum_macs=np.asarray(cum_macs, dtype=np.float64),
+            temperatures_branches=np.asarray(
+                ckpt.get("temperatures_branches", [1.0] * n_exits), dtype=np.float64),
+            temperature_overall=np.float64(ckpt.get("temperature_overall", 1.0)),
+        )
 
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        out = f"results/cascade_{model_tag}_{calib_mode}_{timestamp}.csv"
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        df.to_csv(out, index=False, float_format="%.2f")
-
-        cols = ["p_tar", "acc_global_%", "acc_global_ci95_%",
-                "frac_edge_%", "acc_edge_%", "frac_cloud_%", "acc_cloud_%"]
-        print(df[cols].to_string(index=False))
-        print(f"Salvo em: {out}")
+        for calib_mode in CALIB_MODES:
+            temperatures = resolve_temperatures(ckpt, n_exits, calib_mode)
+            confs, preds = apply_temperatures(logits, temperatures)
+            rows = [cascade_metrics(confs, preds, labels, p, cum_macs)
+                    for p in P_TAR_LIST]
+            df = pd.DataFrame(rows)
+            suffix = "" if split == "test" else f"_{split}"
+            out = f"results/cascade_{model_tag}_{calib_mode}{suffix}_{timestamp}.csv"
+            df.to_csv(out, index=False, float_format="%.2f")
+            print(f"  [{split}/{calib_mode}] "
+                  f"melhor acc={df['acc_global_%'].max():.2f} -> {out}")
     print()
 
 
@@ -216,19 +276,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}\n")
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    testset = torchvision.datasets.CIFAR10(
-        root=DATA_ROOT, train=False, download=True, transform=transform
-    )
-    loader = torch.utils.data.DataLoader(
-        testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2
-    )
-
     for model_path in MODEL_PATHS:
-        run_model(model_path, loader, len(testset), device)
+        run_model(model_path, device)
 
 
 if __name__ == "__main__":
