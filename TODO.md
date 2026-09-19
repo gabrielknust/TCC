@@ -30,16 +30,11 @@ números e conclusões válidos estão no [README.md](README.md).
 ## Backlog
 
 - [x] **Consolidação estatística** (10/08) — `p_tar` escolhido na validação, McNemar pareado, grade estendida a 0.99 → [src/stats.py](src/stats.py), README §7. Aposentados por falta de significância: overall vs branches, ganho de calibração no ponto ótimo, v3a, efeito de seleção nos modelos `equal`
-- [ ] **Análises pós-hoc restantes** (opcionais):
-  - [ ] **ECE condicional** — calibração na população que de fato chega a cada saída, não na marginal
-  - [ ] Refinos: `E[MACs]` contando heads atravessados, IC de Wilson, log do `calibrate.py` (o "NLL antes" é em T=1.5, não T=1)
-- [x] **Integração Flask edge/cloud** (18/08) — servidores próprios em [src/serving/](src/serving/) com decomposição de tempo (pré-proc / borda / rede / nuvem), payload medido e simulação de enlace. Achados: particionar após o 1º ramo é contraproducente (mapa de features 5,5× maior que a imagem); no ponto certo, 19.2 ms vs 94.4 ms do só-nuvem sob 10 Mbps/50 ms → README §8
-- [ ] **Latência: extensões** — medir a v3b (custo maior, payload maior) e a grade b2–b5; rodar borda e nuvem em máquinas distintas de verdade; varrer condições de enlace (Wi-Fi, 4G, 5G)
+- [x] **Infraestrutura de serving** (18/08) — servidores Flask de borda e nuvem em [src/serving/](src/serving/) com decomposição de tempo (pré-proc / borda / rede / nuvem) e payload medido. **Limitação:** os dois serviços rodam no mesmo host e o enlace é simulado por atraso proporcional ao payload, então os números em `results/latency/` não são medida de implantação real. Por isso saíram do README (19/09)
+- [ ] **Validação em borda e nuvem reais** — a arquitetura nunca foi executada em nós separados de verdade; nenhuma conclusão sobre latência de implantação pode ser tirada até isso ser medido. Pendente: rodar borda e nuvem em máquinas distintas, medir o enlace real em vez de simulá-lo, varrer condições (Wi-Fi, 4G, 5G) e estender à v3b e à grade b2–b5. Enquanto não houver medição, o README não reporta latência
+- [x] **README reescrito para leitor externo** (19/09) — texto impessoal, sem histórico de gerações, sem a seção de latência e sem o TL;DR do topo; glossário de estudo em [docs/glossario.md](docs/glossario.md)
 - [x] **README visual** (25/08) — TL;DR de 4 números no topo, forest plot das 27 comparações pareadas (`plots/forest_mcnemar.png`), figuras redistribuídas para as seções a que pertencem com legenda de leitura, §9 comprimida de 54 linhas de prosa para uma tabela de 8 achados
 - [ ] **Escrita da dissertação** — fonte primária: [README.md](README.md) + CSVs em `results/`
-- [ ] *(opcional)* Exit heads com convolução antes do pooling — melhoraria os ramos rasos; é melhoria, não correção, então merece experimento próprio
-- [ ] *(opcional)* Expandir v3 para b2/b4/b5 e `linspace`
-- [ ] *(opcional)* Outros datasets — o orientador testou Caltech-256 e CIFAR-100
 
 ---
 
@@ -59,4 +54,4 @@ Backups das gerações anteriores: `saved_model_backup_v1_adam/`, `_v2_sgd/`, `_
 
 ---
 
-*Última atualização: 2026-08-25*
+*Última atualização: 2026-09-19*
