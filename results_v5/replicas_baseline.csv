@@ -1,0 +1,31 @@
+config,selecao,semente,acc,epoca
+b0,last,1,91.1,200
+b0,last,2,91.8,200
+b0,last,3,90.43,200
+b0,last,4,90.59,200
+b0,last,5,90.59,200
+b0,acc,1,91.1,200
+b0,acc,2,91.79,178
+b0,acc,3,90.45,162
+b0,acc,4,90.47,189
+b0,acc,5,90.61,186
+b0,loss,1,88.85,18
+b0,loss,2,88.9,19
+b0,loss,3,87.8,19
+b0,loss,4,88.06,23
+b0,loss,5,87.82,19
+b0 sem pré-treino,last,1,74.57,200
+b0 sem pré-treino,last,2,75.39,200
+b0 sem pré-treino,last,3,73.68,200
+b0 sem pré-treino,last,4,74.04,200
+b0 sem pré-treino,last,5,73.91,200
+b0 sem pré-treino,acc,1,74.15,112
+b0 sem pré-treino,acc,2,75.32,158
+b0 sem pré-treino,acc,3,73.4,161
+b0 sem pré-treino,acc,4,73.79,156
+b0 sem pré-treino,acc,5,73.84,123
+b0 sem pré-treino,loss,1,73.52,67
+b0 sem pré-treino,loss,2,74.2,70
+b0 sem pré-treino,loss,3,71.85,62
+b0 sem pré-treino,loss,4,72.72,70
+b0 sem pré-treino,loss,5,71.92,65

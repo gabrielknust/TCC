@@ -1,0 +1,181 @@
+config,mode,orcamento_M,acc_mean,acc_std,sementes_que_alcancam
+b2 equal,none,10,nan,nan,0
+b2 equal,none,12,87.204,0.27,5
+b2 equal,none,14,89.682,0.345,5
+b2 equal,none,16,90.474,0.33,5
+b2 equal,none,18,90.658,0.213,5
+b2 equal,none,20,90.684,0.199,5
+b2 equal,overall,10,nan,nan,0
+b2 equal,overall,12,86.726,0.236,5
+b2 equal,overall,14,89.618,0.373,5
+b2 equal,overall,16,90.426,0.23,5
+b2 equal,overall,18,90.626,0.213,5
+b2 equal,overall,20,90.7,0.246,5
+b2 equal,branches,10,nan,nan,0
+b2 equal,branches,12,87.0,0.572,5
+b2 equal,branches,14,89.56,0.381,5
+b2 equal,branches,16,90.402,0.177,5
+b2 equal,branches,18,90.66,0.191,5
+b2 equal,branches,20,90.716,0.184,5
+b2 linspace,none,10,nan,nan,0
+b2 linspace,none,12,82.386,1.259,5
+b2 linspace,none,14,87.34,0.191,5
+b2 linspace,none,16,90.038,0.361,5
+b2 linspace,none,18,90.916,0.503,5
+b2 linspace,none,20,91.19,0.328,5
+b2 linspace,overall,10,nan,nan,0
+b2 linspace,overall,12,nan,nan,0
+b2 linspace,overall,14,87.374,0.168,5
+b2 linspace,overall,16,89.946,0.61,5
+b2 linspace,overall,18,90.908,0.373,5
+b2 linspace,overall,20,91.172,0.298,5
+b2 linspace,branches,10,nan,nan,0
+b2 linspace,branches,12,83.33,0.17,2
+b2 linspace,branches,14,86.84,0.237,5
+b2 linspace,branches,16,89.85,0.406,5
+b2 linspace,branches,18,90.744,0.359,5
+b2 linspace,branches,20,91.162,0.306,5
+b3 equal,none,10,80.044,0.15,5
+b3 equal,none,12,87.358,0.289,5
+b3 equal,none,14,89.744,0.473,5
+b3 equal,none,16,90.684,0.276,5
+b3 equal,none,18,90.792,0.245,5
+b3 equal,none,20,90.792,0.245,5
+b3 equal,overall,10,nan,nan,0
+b3 equal,overall,12,86.38,0.277,5
+b3 equal,overall,14,89.856,0.368,5
+b3 equal,overall,16,90.666,0.294,5
+b3 equal,overall,18,90.812,0.229,5
+b3 equal,overall,20,90.812,0.229,5
+b3 equal,branches,10,80.592,0.178,5
+b3 equal,branches,12,87.07,0.282,5
+b3 equal,branches,14,89.672,0.421,5
+b3 equal,branches,16,90.536,0.233,5
+b3 equal,branches,18,90.742,0.228,5
+b3 equal,branches,20,90.746,0.227,5
+b3 linspace,none,10,76.75,0.269,3
+b3 linspace,none,12,83.982,1.685,5
+b3 linspace,none,14,89.426,0.459,5
+b3 linspace,none,16,91.366,0.476,5
+b3 linspace,none,18,91.49,0.414,5
+b3 linspace,none,20,91.49,0.414,5
+b3 linspace,overall,10,nan,nan,0
+b3 linspace,overall,12,85.127,0.461,3
+b3 linspace,overall,14,89.416,1.061,5
+b3 linspace,overall,16,91.328,0.516,5
+b3 linspace,overall,18,91.512,0.4,5
+b3 linspace,overall,20,91.516,0.397,5
+b3 linspace,branches,10,nan,nan,0
+b3 linspace,branches,12,83.798,0.418,5
+b3 linspace,branches,14,89.23,0.461,5
+b3 linspace,branches,16,91.088,0.457,5
+b3 linspace,branches,18,91.414,0.413,5
+b3 linspace,branches,20,91.42,0.412,5
+b4 equal,none,10,82.766,1.165,5
+b4 equal,none,12,87.83,0.29,5
+b4 equal,none,14,89.636,0.327,5
+b4 equal,none,16,90.436,0.366,5
+b4 equal,none,18,90.516,0.342,5
+b4 equal,none,20,90.516,0.342,5
+b4 equal,overall,10,82.754,0.272,5
+b4 equal,overall,12,87.908,0.741,5
+b4 equal,overall,14,89.764,0.454,5
+b4 equal,overall,16,90.478,0.422,5
+b4 equal,overall,18,90.604,0.374,5
+b4 equal,overall,20,90.608,0.374,5
+b4 equal,branches,10,82.198,0.424,5
+b4 equal,branches,12,87.582,0.277,5
+b4 equal,branches,14,89.434,0.376,5
+b4 equal,branches,16,90.306,0.307,5
+b4 equal,branches,18,90.472,0.34,5
+b4 equal,branches,20,90.488,0.343,5
+b4 linspace,none,10,77.494,0.629,5
+b4 linspace,none,12,86.098,1.088,5
+b4 linspace,none,14,89.43,0.215,5
+b4 linspace,none,16,90.768,0.321,5
+b4 linspace,none,18,90.93,0.301,5
+b4 linspace,none,20,90.93,0.301,5
+b4 linspace,overall,10,nan,nan,0
+b4 linspace,overall,12,85.924,1.019,5
+b4 linspace,overall,14,89.706,0.521,5
+b4 linspace,overall,16,90.758,0.309,5
+b4 linspace,overall,18,90.968,0.308,5
+b4 linspace,overall,20,90.978,0.314,5
+b4 linspace,branches,10,78.48,0.395,5
+b4 linspace,branches,12,85.788,1.296,5
+b4 linspace,branches,14,89.4,0.516,5
+b4 linspace,branches,16,90.522,0.415,5
+b4 linspace,branches,18,90.85,0.285,5
+b4 linspace,branches,20,90.87,0.292,5
+b5 equal,none,10,82.69,0.972,5
+b5 equal,none,12,87.738,0.209,5
+b5 equal,none,14,89.802,0.245,5
+b5 equal,none,16,90.612,0.237,5
+b5 equal,none,18,90.652,0.223,5
+b5 equal,none,20,90.652,0.223,5
+b5 equal,overall,10,82.338,0.083,5
+b5 equal,overall,12,88.288,0.212,5
+b5 equal,overall,14,90.222,0.278,5
+b5 equal,overall,16,90.63,0.267,5
+b5 equal,overall,18,90.72,0.242,5
+b5 equal,overall,20,90.722,0.239,5
+b5 equal,branches,10,81.982,1.087,5
+b5 equal,branches,12,87.702,0.183,5
+b5 equal,branches,14,90.124,0.23,5
+b5 equal,branches,16,90.426,0.255,5
+b5 equal,branches,18,90.61,0.23,5
+b5 equal,branches,20,90.614,0.227,5
+b5 linspace,none,10,79.708,0.513,5
+b5 linspace,none,12,86.682,0.291,5
+b5 linspace,none,14,90.118,0.269,5
+b5 linspace,none,16,90.972,0.277,5
+b5 linspace,none,18,91.054,0.249,5
+b5 linspace,none,20,91.054,0.249,5
+b5 linspace,overall,10,nan,nan,0
+b5 linspace,overall,12,86.834,1.038,5
+b5 linspace,overall,14,90.07,0.265,5
+b5 linspace,overall,16,90.946,0.316,5
+b5 linspace,overall,18,91.084,0.251,5
+b5 linspace,overall,20,91.086,0.252,5
+b5 linspace,branches,10,78.732,0.396,5
+b5 linspace,branches,12,86.796,0.332,5
+b5 linspace,branches,14,89.954,0.221,5
+b5 linspace,branches,16,90.798,0.284,5
+b5 linspace,branches,18,91.034,0.298,5
+b5 linspace,branches,20,91.054,0.292,5
+b3 inv_linspace,none,10,82.2,0.89,5
+b3 inv_linspace,none,12,86.852,0.648,5
+b3 inv_linspace,none,14,89.108,0.251,5
+b3 inv_linspace,none,16,89.794,0.29,5
+b3 inv_linspace,none,18,89.832,0.277,5
+b3 inv_linspace,none,20,89.832,0.277,5
+b3 inv_linspace,overall,10,nan,nan,0
+b3 inv_linspace,overall,12,86.882,0.269,5
+b3 inv_linspace,overall,14,89.12,0.223,5
+b3 inv_linspace,overall,16,89.77,0.308,5
+b3 inv_linspace,overall,18,89.82,0.289,5
+b3 inv_linspace,overall,20,89.82,0.289,5
+b3 inv_linspace,branches,10,80.998,0.264,5
+b3 inv_linspace,branches,12,86.408,0.283,5
+b3 inv_linspace,branches,14,88.984,0.248,5
+b3 inv_linspace,branches,16,89.65,0.266,5
+b3 inv_linspace,branches,18,89.822,0.263,5
+b3 inv_linspace,branches,20,89.828,0.261,5
+v3b,none,10,nan,nan,0
+v3b,none,12,nan,nan,0
+v3b,none,14,nan,nan,0
+v3b,none,16,nan,nan,0
+v3b,none,18,nan,nan,0
+v3b,none,20,nan,nan,0
+v3b,overall,10,nan,nan,0
+v3b,overall,12,nan,nan,0
+v3b,overall,14,nan,nan,0
+v3b,overall,16,nan,nan,0
+v3b,overall,18,nan,nan,0
+v3b,overall,20,nan,nan,0
+v3b,branches,10,nan,nan,0
+v3b,branches,12,nan,nan,0
+v3b,branches,14,nan,nan,0
+v3b,branches,16,nan,nan,0
+v3b,branches,18,nan,nan,0
+v3b,branches,20,nan,nan,0

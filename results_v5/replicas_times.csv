@@ -1,0 +1,14 @@
+config,treinos,min_mean,min_total
+b0,5,39.4,197
+b0 sem pré-treino,5,38.0,190
+b2 equal,5,40.4,202
+b2 linspace,5,42.0,210
+b3 equal,5,41.8,209
+b3 inv_linspace,5,40.6,203
+b3 linspace,5,44.0,220
+b4 equal,5,44.6,223
+b4 linspace,5,44.6,223
+b5 equal,5,48.2,241
+b5 linspace,5,46.2,231
+v3b,5,56.8,284
+total,60,nan,2633
