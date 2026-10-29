@@ -49,6 +49,7 @@ from src.model import (
 N_BRANCHES = int(os.environ.get("N_BRANCHES", "2"))
 LOSS_WEIGHTS_LIST = os.environ.get("LOSS_WEIGHTS_LIST", "equal,linspace").split(",")
 SAVE_DIR = os.environ.get("SAVE_DIR", "saved_model")
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "results")
 EXTRA_STRIDE1_BLOCKS = parse_extra_stride1(os.environ.get("EXTRA_STRIDE1", ""))
 VARIANT = os.environ.get("VARIANT", variant_tag(EXTRA_STRIDE1_BLOCKS))
 MODEL_PATHS = [
@@ -79,6 +80,7 @@ def load_model(ckpt_path, device):
         input_size=ckpt["input_size"],
         pretrained=False,
         extra_stride1_blocks=tuple(ckpt.get("extra_stride1_blocks", ())),
+        exit_head=ckpt.get("exit_head", "mlp"),
     ).to(device)
     # strict=False tolera buffers extras de thop (total_ops/total_params) em
     # checkpoints antigos salvos antes do fix de _linear_flop_positions.
@@ -156,15 +158,17 @@ def _ci95_half_width(correct_mask):
 
 def cascade_metrics(confs, preds, labels, p_tar, cum_macs):
     """Para cada amostra, escolhe a primeira saída cuja conf >= p_tar.
-    Se nenhuma satisfaz, usa a saída final (nuvem).
+    Se nenhuma satisfaz, a amostra vai até a saída final (nuvem) e a classe
+    vem da saída mais confiante.
     """
     n_samples, n_exits = confs.shape
     above = confs >= p_tar  # [N, E]
     has_above = above.any(dim=1)
     first_above = above.float().argmax(dim=1)
     exit_idx = torch.where(has_above, first_above, torch.tensor(n_exits - 1))
+    pick = torch.where(has_above, first_above, confs.argmax(dim=1))
 
-    chosen_pred = preds[torch.arange(n_samples), exit_idx]
+    chosen_pred = preds[torch.arange(n_samples), pick]
     correct = (chosen_pred == labels)
 
     # Custo médio por amostra: cada amostra paga o custo acumulado da saída
@@ -233,7 +237,8 @@ def run_model(model_path, device):
     # val_select (nao val_calib): a temperatura foi ajustada em val_calib, entao
     # la as confiancas parecem melhor calibradas do que seriam em dados novos e
     # o p_tar escolhido sairia enviesado.
-    _, val_select, _ = data.train_val_datasets(DATA_ROOT, mean, std)
+    _, val_select, _ = data.train_val_datasets(
+        DATA_ROOT, mean, std, data.split_seed_from_ckpt(ckpt))
     splits = {"test": data.test_dataset(DATA_ROOT, mean, std), "val": val_select}
 
     cum_macs = model.profile_exit_macs()
@@ -241,15 +246,14 @@ def run_model(model_path, device):
           + ", ".join(f"{m / 1e6:.1f}" for m in cum_macs))
 
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
-    os.makedirs("results/preds", exist_ok=True)
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(os.path.join(RESULTS_DIR, "preds"), exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     for split, dataset in splits.items():
         print(f"\nColetando logits [{split}] para {len(dataset)} amostras...")
         logits, labels = collect_all_logits(model, _loader(dataset), device)
         np.savez_compressed(
-            f"results/preds/{model_tag}_{split}.npz",
+            os.path.join(RESULTS_DIR, "preds", f"{model_tag}_{split}.npz"),
             logits=logits.numpy().astype(np.float16),
             labels=labels.numpy().astype(np.int16),
             cum_macs=np.asarray(cum_macs, dtype=np.float64),
@@ -265,7 +269,8 @@ def run_model(model_path, device):
                     for p in P_TAR_LIST]
             df = pd.DataFrame(rows)
             suffix = "" if split == "test" else f"_{split}"
-            out = f"results/cascade_{model_tag}_{calib_mode}{suffix}_{timestamp}.csv"
+            out = os.path.join(
+                RESULTS_DIR, f"cascade_{model_tag}_{calib_mode}{suffix}_{timestamp}.csv")
             df.to_csv(out, index=False, float_format="%.2f")
             print(f"  [{split}/{calib_mode}] "
                   f"melhor acc={df['acc_global_%'].max():.2f} -> {out}")

@@ -35,11 +35,14 @@ def _sync():
 def infer():
     p_tar = float(request.headers["X-P-Tar"])
     nr_branch_edge = int(request.headers["X-Nr-Branch-Edge"])
+    best_conf = float(request.headers.get("X-Best-Conf", -1.0))
+    best_pred = int(request.headers.get("X-Best-Pred", -1))
     raw = request.get_data()
 
     t0 = time.perf_counter()
     feat = unpack_tensor(raw)
-    pred, conf, exit_idx = forward_cloud(served, feat, p_tar, nr_branch_edge)
+    pred, conf, exit_idx = forward_cloud(
+        served, feat, p_tar, nr_branch_edge, best_conf, best_pred)
     _sync()
     compute_ms = (time.perf_counter() - t0) * 1000
 

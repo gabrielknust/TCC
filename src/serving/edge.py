@@ -84,7 +84,9 @@ def infer():
             f"{CLOUD_URL}/cloud/infer", data=payload, timeout=TIMEOUT,
             headers={"Content-Type": "application/octet-stream",
                      "X-P-Tar": str(p_tar),
-                     "X-Nr-Branch-Edge": str(nr_branch_edge)},
+                     "X-Nr-Branch-Edge": str(nr_branch_edge),
+                     "X-Best-Conf": str(conf),
+                     "X-Best-Pred": str(pred)},
         )
         r.raise_for_status()
         cloud = r.json()

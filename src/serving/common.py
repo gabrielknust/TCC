@@ -81,18 +81,23 @@ def forward_edge(served, x, p_tar, nr_branch_edge):
 
     Devolve (terminou_na_borda, classe, confiança, indice_da_saida, feature_map).
     O feature_map só é relevante quando não terminou: é o que vai para a nuvem.
+    Quando não terminou, classe e confiança são as da saída mais confiante da
+    borda, que a nuvem usa se nenhuma saída atingir o p_tar.
     """
     x = x.to(served.device)
+    best_conf, best_pred = -1.0, -1
     for i in range(min(nr_branch_edge, served.n_branches)):
         x = served.model.stages[i](x)
         conf, pred = _confidence(served, served.model.exits[i](x), i)
         if conf >= p_tar:
             return True, pred, conf, i, None
-    return False, None, None, None, x
+        if conf > best_conf:
+            best_conf, best_pred = conf, pred
+    return False, best_pred, best_conf, None, x
 
 
 @torch.no_grad()
-def forward_cloud(served, x, p_tar, nr_branch_edge):
+def forward_cloud(served, x, p_tar, nr_branch_edge, best_conf=-1.0, best_pred=-1):
     """Continua a inferência a partir do ponto de partição."""
     x = x.to(served.device)
     for i in range(nr_branch_edge, served.n_branches):
@@ -100,8 +105,12 @@ def forward_cloud(served, x, p_tar, nr_branch_edge):
         conf, pred = _confidence(served, served.model.exits[i](x), i)
         if conf >= p_tar:
             return pred, conf, i
+        if conf > best_conf:
+            best_conf, best_pred = conf, pred
     logits = served.model._final_logits(x)
     conf, pred = _confidence(served, logits, served.n_exits - 1)
+    if conf < p_tar and best_conf > conf:
+        return best_pred, best_conf, served.n_exits - 1
     return pred, conf, served.n_exits - 1
 
 
