@@ -6,17 +6,31 @@ import torchvision.models as models
 from thop import profile
 
 
+EXIT_HEADS = ("bnpool", "mlp")
+
+
 class ExitHead(nn.Module):
-    def __init__(self, in_channels, num_classes, hidden=128, dropout=0.5):
+    def __init__(self, in_channels, num_classes, hidden=128, dropout=0.5,
+                 kind="bnpool"):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(in_channels, hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, num_classes),
-        )
+        if kind == "bnpool":
+            self.net = nn.Sequential(
+                nn.BatchNorm2d(in_channels),
+                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.Flatten(),
+                nn.Linear(in_channels, num_classes),
+            )
+        elif kind == "mlp":
+            self.net = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.Flatten(),
+                nn.Linear(in_channels, hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, num_classes),
+            )
+        else:
+            raise ValueError(f"exit_head inválido: {kind} (opções: {EXIT_HEADS})")
 
     def forward(self, x):
         return self.net(x)
@@ -72,9 +86,11 @@ class MobileNetV2EarlyExit(nn.Module):
         pretrained=True,
         head_dropout=0.5,
         extra_stride1_blocks=(),
+        exit_head="bnpool",
     ):
         super().__init__()
         self.n_branches = n_branches
+        self.exit_head = exit_head
         self.num_classes = num_classes
         self.input_size = input_size
         self.extra_stride1_blocks = tuple(
@@ -121,7 +137,7 @@ class MobileNetV2EarlyExit(nn.Module):
         self.exit_positions = sorted(set(exit_positions))
         if len(self.exit_positions) != n_branches:
             raise ValueError(f"exit_positions com duplicatas: {exit_positions}")
-        if max(self.exit_positions) >= len(features_list) - 1:
+        if self.exit_positions and max(self.exit_positions) >= len(features_list) - 1:
             raise ValueError(
                 "exit_positions não pode incluir a última camada (sobraria stage final vazia)"
             )
@@ -144,7 +160,8 @@ class MobileNetV2EarlyExit(nn.Module):
                 x = self.stages[i](x)
                 ch = x.shape[1]
                 self.exits.append(
-                    ExitHead(ch, num_classes, hidden=128, dropout=head_dropout)
+                    ExitHead(ch, num_classes, hidden=128, dropout=head_dropout,
+                             kind=exit_head)
                 )
             self.train()
 
@@ -259,6 +276,7 @@ class MobileNetV2EarlyExit(nn.Module):
         Espera batch_size=1. Retorna (pred_class, conf, exit_idx)
         onde exit_idx ∈ [0, n_branches] (n_branches = saída final).
         """
+        best_conf, best_pred = -1.0, -1
         for i in range(self.n_branches):
             x = self.stages[i](x)
             logits = self.exits[i](x)
@@ -266,7 +284,11 @@ class MobileNetV2EarlyExit(nn.Module):
             conf, pred = torch.max(probs, dim=1)
             if conf.item() >= p_tar:
                 return pred.item(), conf.item(), i
+            if conf.item() > best_conf:
+                best_conf, best_pred = conf.item(), pred.item()
         logits = self._final_logits(x)
         probs = torch.softmax(logits, dim=1)
         conf, pred = torch.max(probs, dim=1)
+        if conf.item() < p_tar and best_conf > conf.item():
+            return best_pred, best_conf, self.n_branches
         return pred.item(), conf.item(), self.n_branches

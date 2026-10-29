@@ -92,9 +92,9 @@ def fit_temperature(logits, labels, device):
     return T.item(), nll_before, nll_after
 
 
-def build_val_loader(mean, std):
+def build_val_loader(mean, std, split_seed=data.SEED):
     """Metade de calibração da validação — DISJUNTA da usada para seleção."""
-    _, _, val_calib = data.train_val_datasets(DATA_ROOT, mean, std)
+    _, _, val_calib = data.train_val_datasets(DATA_ROOT, mean, std, split_seed)
     return torch.utils.data.DataLoader(
         val_calib, batch_size=BATCH_SIZE, shuffle=False, num_workers=2
     ), len(val_calib)
@@ -108,7 +108,8 @@ def calibrate_one(model_path, device):
     model, ckpt_meta = load_model(model_path, device)
     n_exits = model.n_branches + 1
     mean, std = data.norm_from_ckpt(ckpt_meta)
-    val_loader, val_size = build_val_loader(mean, std)
+    val_loader, val_size = build_val_loader(
+        mean, std, data.split_seed_from_ckpt(ckpt_meta))
     print(f"Modelo: n_branches={model.n_branches}  n_exits={n_exits}")
     print(f"Normalização: mean={mean} std={std}")
     print(f"Val set: {val_size} amostras")

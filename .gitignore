@@ -12,3 +12,5 @@ resultados_visuais/
 results/preds/
 early_exit_dnn_analysis/
 uv.lock
+saved_model_v5/
+results_v5/preds/

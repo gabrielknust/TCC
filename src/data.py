@@ -18,6 +18,8 @@ scripts:
    legado quando ausentes.
 """
 
+import math
+
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -55,7 +57,7 @@ def transform_eval(mean=IMAGENET_MEAN, std=IMAGENET_STD):
     ])
 
 
-def train_val_datasets(root, mean=IMAGENET_MEAN, std=IMAGENET_STD):
+def train_val_datasets(root, mean=IMAGENET_MEAN, std=IMAGENET_STD, split_seed=SEED):
     """(treino com augmentation, val_select limpa, val_calib limpa).
 
     A partição treino/validação é a mesma de sempre (mesmo SEED e mesmas 10k
@@ -69,7 +71,7 @@ def train_val_datasets(root, mean=IMAGENET_MEAN, std=IMAGENET_STD):
     clean = torchvision.datasets.CIFAR10(
         root=root, train=True, download=True, transform=transform_eval(mean, std)
     )
-    gen = torch.Generator().manual_seed(SEED)
+    gen = torch.Generator().manual_seed(split_seed)
     perm = torch.randperm(len(aug), generator=gen).tolist()
     n_train = int(TRAIN_FRACTION * len(aug))
     val_idx = perm[n_train:]
@@ -85,6 +87,72 @@ def test_dataset(root, mean=IMAGENET_MEAN, std=IMAGENET_STD):
     return torchvision.datasets.CIFAR10(
         root=root, train=False, download=True, transform=transform_eval(mean, std)
     )
+
+
+def random_crop_flip(x, padding=4):
+    b, c, h, w = x.shape
+    padded = torch.nn.functional.pad(x, (padding,) * 4)
+    oy = torch.randint(0, 2 * padding + 1, (b, 1), device=x.device)
+    ox = torch.randint(0, 2 * padding + 1, (b, 1), device=x.device)
+    rows = (oy + torch.arange(h, device=x.device)).view(b, 1, h, 1)
+    x = padded.gather(2, rows.expand(b, c, h, w + 2 * padding))
+    cols = (ox + torch.arange(w, device=x.device)).view(b, 1, 1, w)
+    x = x.gather(3, cols.expand(b, c, h, w))
+    flip = (torch.rand(b, device=x.device) < 0.5).view(b, 1, 1, 1)
+    return torch.where(flip, x.flip(3), x)
+
+
+class GpuLoader:
+    def __init__(self, images, labels, batch_size, mean, std, augment=False,
+                 shuffle=False):
+        self.images, self.labels = images, labels
+        self.batch_size = batch_size
+        self.mean = torch.tensor(mean, device=images.device).view(1, -1, 1, 1)
+        self.std = torch.tensor(std, device=images.device).view(1, -1, 1, 1)
+        self.augment, self.shuffle = augment, shuffle
+
+    def __len__(self):
+        return math.ceil(len(self.labels) / self.batch_size)
+
+    def __iter__(self):
+        n = len(self.labels)
+        order = (torch.randperm(n) if self.shuffle else torch.arange(n)).to(
+            self.images.device)
+        for start in range(0, n, self.batch_size):
+            idx = order[start:start + self.batch_size]
+            x = self.images[idx].float().div_(255)
+            if self.augment:
+                x = random_crop_flip(x)
+            yield (x - self.mean) / self.std, self.labels[idx]
+
+
+def gpu_loaders(root, device, batch_size, mean=IMAGENET_MEAN, std=IMAGENET_STD,
+                split_seed=SEED):
+    train = torchvision.datasets.CIFAR10(root=root, train=True, download=True)
+    test = torchvision.datasets.CIFAR10(root=root, train=False, download=True)
+
+    def tensors(ds, idx=None):
+        x = torch.from_numpy(ds.data).permute(0, 3, 1, 2).contiguous()
+        y = torch.tensor(ds.targets)
+        if idx is not None:
+            x, y = x[idx], y[idx]
+        return x.to(device), y.to(device)
+
+    gen = torch.Generator().manual_seed(split_seed)
+    perm = torch.randperm(len(train), generator=gen)
+    n_train = int(TRAIN_FRACTION * len(train))
+    val_idx = perm[n_train:]
+    n_select = int(VAL_SELECT_FRACTION * len(val_idx))
+    return (
+        GpuLoader(*tensors(train, perm[:n_train]), batch_size, mean, std,
+                  augment=True, shuffle=True),
+        GpuLoader(*tensors(train, val_idx[:n_select]), batch_size, mean, std),
+        GpuLoader(*tensors(test), batch_size, mean, std),
+    )
+
+
+def split_seed_from_ckpt(ckpt):
+    return int(ckpt.get("split_seed", SEED))
 
 
 def norm_from_ckpt(ckpt):
