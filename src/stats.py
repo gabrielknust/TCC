@@ -5,10 +5,12 @@ Duas correcoes de protocolo sobre a analise anterior:
 1. **p_tar escolhido na validacao.** Antes o melhor ponto de operacao era lido
    direto no test set — com 14 limiares x 3 calibracoes x varias configuracoes,
    isso e' data snooping e infla o numero reportado. Aqui o limiar e' escolhido
-   maximizando a acuracia na validacao e o teste e' reportado so' nesse ponto.
+   na validacao (o menor que nao perde para a saida final sozinha) e o teste e'
+   reportado so' nesse ponto.
 
-2. **McNemar pareado** no lugar de comparar IC95%. Os modelos classificam as
-   MESMAS amostras, entao a comparacao correta e' pareada: olha so' onde eles
+2. **McNemar pareado**, so' entre modos de calibracao do mesmo modelo, com
+   correcao de Holm. As mesmas amostras passam pelo mesmo modelo, entao a
+   comparacao correta e' pareada: olha so' onde eles
    discordam (b = A acerta e B erra; c = o inverso) e testa se o desequilibrio
    entre b e c e' maior que o acaso. Bem mais sensivel que comparar intervalos,
    que tratam as duas medidas como independentes.
@@ -24,8 +26,8 @@ import os
 
 import numpy as np
 
-RESULTS_DIR = "results"
-PREDS_DIR = "results/preds"
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "results")
+PREDS_DIR = os.path.join(RESULTS_DIR, "preds")
 CALIB_MODES = ["none", "overall", "branches"]
 P_TAR_LIST = [round(0.50 + 0.05 * i, 2) for i in range(10)] + [0.96, 0.97, 0.98, 0.99]
 
@@ -60,16 +62,21 @@ def cascade(d, mode, p_tar):
     confs, preds = p.max(axis=2), p.argmax(axis=2)
 
     above = confs >= p_tar
-    exit_idx = np.where(above.any(axis=1), above.argmax(axis=1), confs.shape[1] - 1)
-    chosen = preds[np.arange(len(exit_idx)), exit_idx]
-    return chosen == d["labels"], d["cum_macs"][exit_idx].mean() / 1e6
+    hit = above.any(axis=1)
+    exit_idx = np.where(hit, above.argmax(axis=1), confs.shape[1] - 1)
+    pick = np.where(hit, exit_idx, confs.argmax(axis=1))
+    chosen = preds[np.arange(len(pick)), pick]
+    return chosen == d["labels"], d["cum_macs"][exit_idx].mean() / 1e6, exit_idx
 
 
 def select_ptar(tag, mode):
-    """Limiar que maximiza a acuracia na VALIDACAO."""
+    """Menor limiar cuja acuracia na VALIDACAO nao fica abaixo da saida final
+    sozinha; se nenhum chega la, o de maior acuracia."""
     dv = load(tag, "val")
+    final = (dv["logits"][:, -1].argmax(axis=1) == dv["labels"]).mean()
     accs = [(cascade(dv, mode, p)[0].mean(), p) for p in P_TAR_LIST]
-    return max(accs)[1]
+    ok = [p for acc, p in accs if acc >= final]
+    return min(ok) if ok else max(accs, key=lambda a: (a[0], -a[1]))[1]
 
 
 def mcnemar(a, b):
@@ -93,17 +100,18 @@ def evaluate(tag, mode):
     """Protocolo honesto: escolhe p_tar na val, reporta teste nesse ponto."""
     p_tar = select_ptar(tag, mode)
     dt = load(tag, "test")
-    correct, macs = cascade(dt, mode, p_tar)
+    correct, macs, exit_idx = cascade(dt, mode, p_tar)
+    edge = exit_idx < dt["logits"].shape[1] - 1
     return {"tag": tag, "mode": mode, "p_tar": p_tar, "correct": correct,
-            "acc": 100 * correct.mean(), "ci": ci95(correct), "macs": macs}
+            "acc": 100 * correct.mean(), "ci": ci95(correct), "macs": macs,
+            "frac_edge": 100 * edge.mean(), "frac_edge_ci": ci95(edge),
+            "frac_cloud": 100 * (1 - edge.mean()),
+            "acc_edge": 100 * correct[edge].mean() if edge.any() else float("nan"),
+            "acc_cloud": 100 * correct[~edge].mean() if (~edge).any() else float("nan")}
 
 
 def fmt(r):
     return f"{r['acc']:.2f}±{r['ci']:.2f} @{r['macs']:5.1f}M (p={r['p_tar']:.2f})"
-
-
-ROWS = []
-GROUP = {"A": None}
 
 
 def paired_ci95(n_a, n_b, n_total):
@@ -113,19 +121,14 @@ def paired_ci95(n_a, n_b, n_total):
     return 100 * 1.96 * math.sqrt(max(var, 0.0)) / n_total
 
 
-def compare(label, ra, rb):
-    n_a, n_b, p = mcnemar(ra["correct"], rb["correct"])
-    delta = ra["acc"] - rb["acc"]
-    sig = "SIM" if p < 0.05 else "nao"
-    print(f"  {label:<34} Δ={delta:+6.2f}pp  discordam {n_a + n_b:>4} "
-          f"({n_a} vs {n_b})  p={p:.4f}  significativo: {sig}")
-    ROWS.append({
-        "group": GROUP["A"], "label": label, "delta": round(delta, 3),
-        "ci95": round(paired_ci95(n_a, n_b, len(ra["correct"])), 3),
-        "n_a": n_a, "n_b": n_b, "discordantes": n_a + n_b,
-        "p_value": p, "significant": int(p < 0.05),
-        "p_tar_a": ra["p_tar"], "p_tar_b": rb["p_tar"],
-    })
+def holm(p_values):
+    order = np.argsort(p_values)
+    adjusted = np.empty(len(p_values))
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (len(p_values) - rank) * p_values[i]))
+        adjusted[i] = running
+    return adjusted
 
 
 def main():
@@ -133,79 +136,48 @@ def main():
                    for f in glob.glob(f"{PREDS_DIR}/*_test.npz")})
     print(f"{len(tags)} modelos em {PREDS_DIR}\n")
 
-    print("=" * 96)
-    print("TABELA 1 — p_tar escolhido na VALIDACAO, acuracia reportada no TESTE")
-    print("=" * 96)
-    R = {}
+    R = {(tag, mode): evaluate(tag, mode) for tag in tags for mode in CALIB_MODES}
     for tag in tags:
-        for mode in CALIB_MODES:
-            R[(tag, mode)] = evaluate(tag, mode)
-        print(f"{tag:<40} " + " | ".join(
+        print(f"{tag:<44} " + " | ".join(
             f"{m}: {fmt(R[(tag, m)])}" for m in ("none", "overall")))
 
-    def get(tag, mode="overall"):
-        return R.get((f"mobilenet_{tag}", mode))
+    op_fields = ["tag", "mode", "p_tar", "acc", "ci", "macs", "frac_edge",
+                 "frac_edge_ci", "frac_cloud", "acc_edge", "acc_cloud"]
+    op_out = os.path.join(RESULTS_DIR, "stats_operating_points.csv")
+    with open(op_out, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=op_fields)
+        w.writeheader()
+        for r in R.values():
+            w.writerow({k: round(float(r[k]), 4) if k not in ("tag", "mode") else r[k]
+                        for k in op_fields})
+    print(f"\n{len(R)} pontos de operacao salvos em {op_out}")
 
-    print()
-    print("=" * 96)
-    print("TABELA 2 — McNemar pareado (mesmas 10k amostras)")
-    print("=" * 96)
-
-    GROUP["A"] = "A"
-    print("\n[A] linspace vs equal (calib overall, checkpoint por val acc)")
-    for n in (2, 3, 4, 5):
-        a, b = get(f"acc_b{n}_linspace_best"), get(f"acc_b{n}_equal_best")
-        if a and b:
-            compare(f"b{n}: linspace vs equal", a, b)
-
-    GROUP["A"] = "B"
-    print("\n[B] overall vs branches (equal, checkpoint por val acc)")
-    for n in (2, 3, 4, 5):
-        a, b = R.get((f"mobilenet_acc_b{n}_equal_best", "overall")), R.get((f"mobilenet_acc_b{n}_equal_best", "branches"))
-        if a and b:
-            compare(f"b{n}: overall vs branches", a, b)
-
-    GROUP["A"] = "C"
-    print("\n[C] calibracao vs nenhuma (equal, val acc)")
-    for n in (2, 3, 4, 5):
-        a, b = R.get((f"mobilenet_acc_b{n}_equal_best", "overall")), R.get((f"mobilenet_acc_b{n}_equal_best", "none"))
-        if a and b:
-            compare(f"b{n}: overall vs sem calib", a, b)
-
-    GROUP["A"] = "D"
-    print("\n[D] arquitetura (b3 equal, overall, val acc)")
-    base = get("acc_b3_equal_best")
-    for tag, lbl in [("s14-acc_b3_equal_best", "v3a (4x4) vs padrao"),
-                     ("s7-14-acc_b3_equal_best", "v3b (8x8) vs padrao")]:
-        r = get(tag)
-        if r and base:
-            compare(lbl, r, base)
-
-    GROUP["A"] = "E"
-    print("\n[E] criterio de selecao de checkpoint (val acc vs val loss, overall)")
-    for n in (2, 3, 4, 5):
-        for st in ("equal", "linspace"):
-            a, b = get(f"acc_b{n}_{st}_best"), get(f"b{n}_{st}_best")
-            if a and b:
-                compare(f"b{n} {st}: sel acc vs sel loss", a, b)
-    for tag, lbl in [("s14", "v3a"), ("s7-14", "v3b")]:
-        a, b = get(f"{tag}-acc_b3_equal_best"), get(f"{tag}_b3_equal_best")
-        if a and b:
-            compare(f"{lbl}: sel acc vs sel loss", a, b)
-
-    GROUP["A"] = "F"
-    print("\n[F] numero de ramos (equal, overall, val acc)")
-    for n in (3, 4, 5):
-        a, b = get(f"acc_b{n}_equal_best"), get("acc_b2_equal_best")
-        if a and b:
-            compare(f"b{n} vs b2", a, b)
-
+    rows = []
+    for tag in (t for t in tags if "-last_" in t):
+        for a, b in (("overall", "none"), ("overall", "branches")):
+            ra, rb = R[(tag, a)], R[(tag, b)]
+            n_a, n_b, p = mcnemar(ra["correct"], rb["correct"])
+            rows.append({
+                "tag": tag, "comparacao": f"{a} vs {b}",
+                "delta": round(ra["acc"] - rb["acc"], 3),
+                "ci95": round(paired_ci95(n_a, n_b, len(ra["correct"])), 3),
+                "n_a": n_a, "n_b": n_b, "p_value": p,
+                "p_tar_a": ra["p_tar"], "p_tar_b": rb["p_tar"],
+            })
+    if not rows:
+        return
+    adjusted = holm(np.array([r["p_value"] for r in rows]))
+    for r, adj in zip(rows, adjusted):
+        r["p_holm"] = adj
+        r["significant"] = int(adj < 0.05)
     out = os.path.join(RESULTS_DIR, "stats_comparisons.csv")
     with open(out, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(ROWS[0].keys()))
+        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader()
-        w.writerows(ROWS)
-    print(f"\n{len(ROWS)} comparacoes salvas em {out}")
+        w.writerows(rows)
+    sig = sum(r["significant"] for r in rows)
+    print(f"McNemar dentro do mesmo modelo: {len(rows)} testes, "
+          f"{sig} significativos depois da correcao de Holm -> {out}")
 
 
 if __name__ == "__main__":
