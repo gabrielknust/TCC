@@ -25,6 +25,12 @@ Escopo: as seções 1 a 6 avaliam a rede e a cascata em acurácia e em custo com
 (MACs), com a rede inteira na mesma máquina. A seção 7 mede a cascata em tempo, com a borda
 e a nuvem em máquinas separadas e rede real entre elas, e está em andamento.
 
+A configuração escolhida (seção 5) tem três saídas antecipadas, pesos da loss crescentes
+com a profundidade da saída (`linspace`), calibração por uma temperatura única (`overall`)
+e `p_tar` 0.90. No teste, na média de 5 treinos, ela acerta 91.45% das imagens, contra
+90.90% da mesma rede sem saídas antecipadas, gasta 62% dos MACs dessa rede e resolve 89.0%
+das amostras na borda.
+
 ## 1. Modelo
 
 Os modelos são identificados por bN, em que N é o número de saídas antecipadas (b2 a b5).
@@ -35,7 +41,7 @@ treinada com a mesma receita, usada como referência.
 |---|---|
 | Backbone | MobileNetV2 (`torchvision`), pesos do ImageNet (`IMAGENET1K_V1`) |
 | Saídas antecipadas | 2 a 5 (`N_BRANCHES`) |
-| Posicionamento das saídas | linear em FLOPs acumulados (medidos com `thop`), como no framework de referência |
+| Posicionamento das saídas | linear em MACs acumulados (medidos com `thop`), como no framework de referência |
 | Parâmetros | 2.24 M no b0; as saídas antecipadas somam de 1.6 k (b2) a 4.6 k (b5) |
 | Pesos em float32 | 8.5 MB |
 | Maior ativação intermediária | 384 KB (lote de 1 imagem, float32), igual em todos |
@@ -70,10 +76,10 @@ BatchNorm2d(C) → AdaptiveAvgPool2d(1×1) → Flatten → Linear(C → 10)
 
 ### Posicionamento, custo e memória por saída
 
-Os FLOPs de cada bloco de `features[]` são medidos com `thop.profile` e acumulados. As N
-saídas antecipadas ficam nos primeiros blocos que atingem as frações `i/(N+1)` do custo
-total, de modo que o espaçamento entre elas é igual em computação, não em número de
-camadas.
+Os MACs de cada bloco de `features[]` são medidos com `thop.profile` e acumulados (o código
+e o framework de referência chamam essa contagem de FLOPs). As N saídas antecipadas ficam
+nos primeiros blocos que atingem as frações `i/(N+1)` do custo total, de modo que o
+espaçamento entre elas é igual em computação, não em número de camadas.
 
 | Modelo | Posições das saídas | MACs acumulados por saída (M) | Parâmetros acumulados por saída (M) |
 |---|---|---|---|
@@ -102,9 +108,9 @@ comparado com a imagem de 32×32 (3.0 KB crua, 2.2 KB em PNG, média de 1000 ima
 
 Em float32, o mapa só fica menor que a imagem crua a partir do bloco 14 (2.5 contra 3.0 KB),
 e ainda é maior que o PNG. Em float16, fica menor que as duas no bloco 10 e a partir do bloco
-14. Cortar a rede cedo envia de 2.7 a 11 vezes mais dados que a própria imagem. Só vale
-particionar onde o volume de dados encolhe, e em imagens de 32×32 isso acontece apenas nos
-blocos profundos. Em resolução maior a imagem pesa muito mais e a conta muda.
+14. Nos cortes mais rasos, depois dos blocos 2 a 6, o mapa em float32 tem de 2.7 a 8 vezes o
+tamanho da imagem crua e de 3.6 a 11 vezes o do PNG. Só vale particionar onde o volume de
+dados encolhe, e em imagens de 32×32 isso acontece apenas nos blocos profundos. Em resolução maior a imagem pesa muito mais e a conta muda.
 
 ## 2. Dados e treinamento
 
@@ -204,7 +210,7 @@ Temperaturas, média de 5 treinos:
 A temperatura cresce, em geral, com a profundidade da saída: as saídas profundas são as mais
 overconfident. O desvio da temperatura entre treinos é de 0.01 a 0.02.
 
-### Com limiar fixo, a calibração compra acurácia com custo
+### Com limiar fixo, a calibração aumenta a acurácia e o custo
 
 ![Efeito da calibração](plots/calib_effect.png)
 
@@ -216,13 +222,14 @@ se sobrepõem. No ponto de operação escolhido na validação, a diferença ent
 `none` fica entre −0.05 e +0.07 pp em média, com o intervalo de confiança contendo zero em
 todas as 10 configurações.
 
-### O que a calibração entrega:
+### Acerto na borda e na nuvem
 
 ![Acerto na borda](plots/edge_accuracy.png)
 
 A borda só responde quando alguma saída tem confiança de pelo menos `p_tar`, então o esperado
-é que essas respostas acertem pelo menos `p_tar` das vezes. Sem calibração isso deixa de
-acontecer nos limiares altos, porque a rede é mais confiante do que deveria.
+é que essas respostas acertem pelo menos `p_tar` das vezes, o que aqui se chama garantia do
+limiar. Sem calibração ela deixa de valer nos limiares altos, porque a rede é mais confiante
+do que deveria.
 
 A tabela mostra a acurácia das amostras resolvidas na borda nos 40 modelos da grade b2 a b5
 (8 configurações, 5 treinos cada): a média dos 40 e, entre parênteses, o pior modelo.
@@ -302,8 +309,8 @@ de confiança. O modo `branches` reduz esse efeito, mas não muda a acurácia da
 
 ## 4. Avaliação da cascata
 
-* Test set completo (10k amostras). Os logits de todas as saídas são calculados uma vez e
-  reutilizados.
+* Conjunto de teste completo (10 mil imagens). Os logits de todas as saídas são calculados
+  uma vez e reutilizados.
 * `p_tar` de 0.50 a 0.95 em passos de 0.05, mais 0.96, 0.97, 0.98 e 0.99,
   combinados com os 3 modos de calibração.
 * A amostra sai na primeira saída com confiança ≥ `p_tar`. Se nenhuma atinge o limiar, ela
@@ -312,11 +319,12 @@ de confiança. O modo `branches` reduz esse efeito, mas não muda a acurácia da
   saída final (−0.03 pp em média; melhor em 17 dos 50 modelos), sem custo adicional,
   porque a amostra já passou por todas as saídas.
 * Ponto de operação: o menor `p_tar` cuja acurácia em `val_select` não fica abaixo da saída
-  final sozinha. Ou seja, a cascata não pode acertar menos que a rede inteira. Se nenhum
-  limiar chega lá (15 dos 50 modelos com `overall`), vale o de maior acurácia em
-  `val_select` e, no empate, o menor deles. Nesses modelos a acurácia costuma ser a mesma de
-  0.90 ou 0.95 até 0.99, e o menor limiar acerta o mesmo com menos amostras na nuvem. O
-  teste é avaliado só nesse ponto.
+  final sozinha, de modo que, na validação, a cascata acerte pelo menos o mesmo que a rede
+  inteira. Se nenhum limiar chega lá (15 dos 50 modelos com `overall`), vale o de maior
+  acurácia em `val_select` e, no empate, o menor deles. Nesses modelos a acurácia costuma ser
+  a mesma de 0.90 ou 0.95 até 0.99, e o menor limiar acerta o mesmo com menos amostras na
+  nuvem. O teste é avaliado só nesse ponto, e nele a cascata pode ficar um pouco abaixo da
+  saída final (seção 10).
 * Variância: as tabelas trazem média e desvio padrão de 5 treinos. As comparações entre
   configurações usam a diferença pareada por treino (mesma divisão de dados) e o IC95% da
   média por t de Student (seção 8).
@@ -361,10 +369,12 @@ As exceções são o b3 `linspace`, que acerta 0.51 pp a mais (IC95% de +0.02 a 
 do custo, o b4 `equal`, que acerta 0.45 pp a menos (IC95% de −0.74 a −0.17), e o
 `inv_linspace`, 1.16 pp a menos.
 
-A fração resolvida na borda varia entre treinos: o desvio chega a 5.6 pp (b2 `linspace`). A
-causa é o limiar, que vai de 0.80 a 0.98 para a mesma configuração. Acima de
-cerca de 0.85 a curva de acurácia é plana, e a regra de escolha decide entre pontos quase
-equivalentes em acurácia, mas distantes em fração na borda.
+A fração resolvida na borda varia entre treinos, com desvio de até 5.6 pp (b2 `linspace`). A
+causa é o limiar, que no b2 `linspace` vai de 0.80 a 0.97 entre os treinos. Na média dos 5
+treinos dessa configuração, no teste, subir o limiar de 0.80 para 0.97 aumenta a acurácia em
+0.34 pp e reduz a fração na borda em 12.9 pp, e a partir de 0.90 a curva de acurácia fica
+praticamente plana. Como a acurácia muda pouco nessa faixa, poucas imagens de diferença na
+validação mudam o limiar escolhido, e com ele a fração na borda.
 
 ### Comparação no mesmo custo
 
@@ -397,7 +407,7 @@ sem decisão por amostra. Em cada treino, a cascata no ponto de operação (cali
 Como o custo da cascata muda com o limiar, essa saída pode mudar entre treinos. Média de 5
 treinos:
 
-| Modelo | Saída fixa | Acurácia da saída fixa | MACs | Acurácia da cascata | MACs | Cascata − saída fixa (IC95%) |
+| Modelo | Saída fixa | Acurácia da saída fixa | MACs da saída fixa | Acurácia da cascata | MACs da cascata | Cascata − saída fixa (IC95%) |
 |---|---|---|---|---|---|---|
 | b2 `equal` | 2 | 90.21 | 19.1 M | 90.50 | 16.2 M | +0.29 (−0.01 a +0.59) |
 | b2 `linspace` | 2 ou final | 90.98 | 22.1 M | 91.13 | 19.1 M | +0.14 (−0.17 a +0.46) |
@@ -440,8 +450,8 @@ custa a rede inteira.
 No ponto de operação, a primeira saída é pouco usada nos modelos b3 a b5: de 0.1% a 4.6% das
 amostras. No b2, cuja primeira saída fica no bloco 5, ela resolve 41% com `equal`. Em todos
 os modelos, a saída mais usada é a que custa de 14.2 a 19.1 M MACs, com 42% a 72% das
-amostras, ou seja, a borda precisaria executar de 53% a 72% da rede. No b4, a segunda saída,
-com 10.8 M MACs, também resolve de 32% a 36%.
+amostras. Para resolver essas amostras, a borda precisaria executar de 53% a 72% da rede. No
+b4, a segunda saída, com 10.8 M MACs, também resolve de 32% a 36%.
 
 ### Por classe
 
@@ -488,10 +498,8 @@ usada em todas as análises.
 
 ### Mais resolução no fim da rede
 
-A variante v3b remove os strides de `features[7]` e `features[14]`, o que deixa o mapa
-final com 8×8 pixels e o backbone com 151.6 M MACs, 5.7 vezes o da rede padrão. Como as
-posições das saídas são recalculadas pelos FLOPs, elas mudam para os blocos 13, 16 e 17.
-Usa b3 com `equal`.
+Na v3b, definida na seção 1, as posições das saídas são recalculadas pelos MACs do novo
+backbone e mudam para os blocos 13, 16 e 17.
 
 ![Fronteira por arquitetura](plots/variants_acc_vs_macs.png)
 
@@ -681,6 +689,10 @@ diferenças de estabilidade.
 
 ## 9. Resumo dos achados
 
+A configuração escolhida é o b3 `linspace` com calibração `overall` e `p_tar` 0.90 (seção 5).
+No teste, ela acerta 91.45% com 62% dos MACs do b0 e resolve 89.0% das amostras na borda. A
+tabela resume os achados de todas as configurações avaliadas.
+
 | # | Achado | Evidência |
 |---|---|---|
 | 1 | A cascata acerta o mesmo que a rede inteira com 59% a 72% do custo | no ponto de operação, de 90.45% a 91.42%, contra 90.90% do b0; dentro do ruído em 6 das 8 configurações da grade |
@@ -690,7 +702,7 @@ diferenças de estabilidade.
 | 5 | Mais peso nas saídas rasas piora a cascata | `inv_linspace`: −0.97 pp contra `equal` e −1.67 pp contra `linspace` no b3, apesar da primeira saída mais forte |
 | 6 | O pré treino no ImageNet é a maior fonte de acurácia | +16.6 pp no b0, mesmo em 32×32 |
 | 7 | Treinar saídas antecipadas junto não melhora a saída final de forma geral | só o b3 `linspace` supera o b0 (+0.71 pp); o b4 `equal` fica abaixo (−0.42 pp) |
-| 8 | A calibração não muda a acurácia no mesmo custo; ela torna o limiar uma garantia | no ponto de operação, de −0.05 a +0.07 pp; o acerto na borda fica acima de `p_tar` nos 40 modelos até 0.90 sem calibração, 0.95 com `overall` e 0.97 com `branches` |
+| 8 | A calibração não muda a acurácia no mesmo custo e estende a garantia do limiar até 0.95 ou 0.97 | no ponto de operação, de −0.05 a +0.07 pp; o acerto na borda fica acima de `p_tar` nos 40 modelos até 0.90 sem calibração, até 0.95 com `overall` e até 0.97 com `branches` |
 | 9 | Escolher o modelo pela loss de validação interrompe cedo demais | a loss da saída final atinge o mínimo entre as épocas 12 e 27 em 47 de 50 treinos; perda de 0.14 a 2.59 pp; a última época empata com a melhor por acurácia |
 | 10 | Mais resolução rende acurácia, a custo muito maior | v3b: +2.31 pp com 3.44 vezes o custo |
 | 11 | A fração enviada à nuvem acompanha a dificuldade da classe | gato e cachorro são as que mais vão à nuvem nos 5 treinos, seguidas de pássaro em 3 dos 5 |
@@ -704,8 +716,18 @@ diferenças de estabilidade.
 * O `E[MACs]` soma o custo da borda e o da nuvem como se rodassem na mesma máquina.
 * Cinco treinos por configuração mostram o que se repete, mas diferenças abaixo de uns 0.4 pp
   entre configurações ficam dentro do ruído.
-* O limiar escolhido varia de 0.80 a 0.98 entre treinos da mesma configuração, o que faz a
-  fração na borda variar até 14 pp (b2 `linspace`).
+* Quando o limiar é escolhido na validação de cada treino, ele varia de 0.80 a 0.97 dentro
+  de uma mesma configuração da grade, e a fração na borda varia até 14 pp (b2 `linspace`). A
+  configuração escolhida usa o mesmo limiar, 0.90, em todos os treinos, e com ele a fração na
+  borda vai de 88.2% a 89.6%.
+* A regra do ponto de operação exige que a cascata não fique abaixo da saída final em
+  `val_select`, e no teste ela fica um pouco abaixo. Nos 50 modelos com `overall`, a cascata
+  fica abaixo da saída final do próprio modelo em 34, e a diferença média é de −0.07 pp, ou
+  6.7 das 10 mil imagens de teste (IC95% de −0.12 a −0.02 pp). Como a regra escolhe o menor
+  limiar que alcança a saída final, ela tende a parar em limiares em que o ruído da validação
+  favoreceu a cascata, e esse ruído não se repete no teste. Na configuração escolhida, em
+  0.90, a cascata fica abaixo da saída final no teste em todos os 5 treinos, 0.17 pp na média
+  (IC95% de −0.26 a −0.07), embora fique 0.02 pp acima na validação.
 * Esta receita enfraquece a primeira saída em relação à receita anterior do projeto, que
   usava lr constante, nenhum weight decay e parada antecipada. Num piloto com o b3 no
   primeiro treino, a primeira saída perdeu 1.8 pp com `equal` e 3.2 pp com `linspace`, e a
@@ -723,7 +745,7 @@ diferenças de estabilidade.
 |---|---|
 | GPU | NVIDIA GeForce RTX 3070, 8 GB |
 | CPU e memória | 4 vCPUs, 9 GB (WSL2) |
-| Software | Python 3.14.2, PyTorch 2.9.1, CUDA 12.8, cuDNN 9.10.2; dependências travadas em `uv.lock` |
+| Software | Python 3.14.2, PyTorch 2.9.1, CUDA 12.8, cuDNN 9.10.2; versões fixadas em `requirements.txt` |
 | Tempo por treino | de 38 a 57 min (200 épocas, um treino por vez, dados na GPU) |
 | Retreino completo | 60 treinos em cerca de 44 h, mais 2 h de calibração e inferência |
 
@@ -731,7 +753,7 @@ diferenças de estabilidade.
 
 ```
 src/
-  model.py          # MobileNetV2EarlyExit paramétrico, posicionamento por FLOPs,
+  model.py          # MobileNetV2EarlyExit paramétrico, posicionamento por MACs,
                     #   MACs por saída, variantes de stride, tipos de cabeça
   data.py           # datasets, divisão treino/val_select/val_calib por semente,
                     #   carregamento e augmentation na GPU
@@ -764,6 +786,14 @@ e `run_replicas.sh` são de uma versão anterior da receita e não entram nos re
 
 Requer [uv](https://docs.astral.sh/uv/) e, de preferência, uma GPU CUDA.
 
+Os checkpoints (`saved_model_v5/`, 1.7 GB) e os logits (`results_v5/preds/`, 176 MB) ficam
+fora do repositório por causa do tamanho. Os CSVs de `results_v5/` e as figuras de `plots/`
+estão versionados, mas `src.stats`, `src.replicas`, `src.per_class` e `src.plots` só rodam
+depois do retreino, porque leem os logits, os checkpoints do b0 ou o histórico de treino em
+`saved_model_v5/history/`. O único checkpoint versionado é o da configuração escolhida na
+seção 5 (b3 `linspace`, treino 1, modelo da última época), que traz gravadas as temperaturas
+da calibração e é o usado na seção 7.
+
 ```bash
 uv sync && uv pip install -r requirements.txt
 
@@ -780,14 +810,18 @@ uv run python -m src.profile_models
 uv run python -m src.plots
 N_BRANCHES=3 LOSS_WEIGHTS_LIST=linspace VARIANT=r1-last uv run python -m src.reliability
 
-# um treino isolado (semente 1, b3 equal):
+# treinos isolados da semente 1 (divisão 42), b3 equal:
 N_BRANCHES=3 LOSS_WEIGHTS_LIST=equal VARIANT=r1 TRAIN_SEED=1 SPLIT_SEED=42 \
     SAVE_DIR=saved_model_v5 uv run python -m src.train
-#   EXTRA_STRIDE1=7,14  → v3b
-#   PRETRAINED=0        → sem os pesos do ImageNet
+# v3b:
+N_BRANCHES=3 LOSS_WEIGHTS_LIST=equal VARIANT=s7-14-r1 EXTRA_STRIDE1=7,14 \
+    TRAIN_SEED=1 SPLIT_SEED=42 SAVE_DIR=saved_model_v5 uv run python -m src.train
+# b0 sem os pesos do ImageNet:
+N_BRANCHES=0 LOSS_WEIGHTS_LIST=equal VARIANT=scratch-r1 PRETRAINED=0 \
+    TRAIN_SEED=1 SPLIT_SEED=42 SAVE_DIR=saved_model_v5 uv run python -m src.train
 
-# borda e nuvem em máquinas separadas (seção 7, em andamento);
-# o checkpoint precisa estar nas duas máquinas. Na nuvem:
+# borda e nuvem em máquinas separadas (seção 7, em andamento), cada uma
+# com um clone do repositório, que já traz o checkpoint. Na nuvem:
 CHECKPOINT=saved_model_v5/mobilenet_r1-last_b3_linspace_best.pth SERVING_DEVICE=cpu \
     CLOUD_HOST=0.0.0.0 uv run python -m src.serving.cloud
 # na borda, com o IP público da nuvem:
