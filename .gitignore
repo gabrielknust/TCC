@@ -12,5 +12,6 @@ resultados_visuais/
 results/preds/
 early_exit_dnn_analysis/
 uv.lock
-saved_model_v5/
+saved_model_v5/*
+!saved_model_v5/mobilenet_r1-last_b3_linspace_best.pth
 results_v5/preds/
